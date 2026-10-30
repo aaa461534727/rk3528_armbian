@@ -5,7 +5,7 @@
 set -e
 cd "$(dirname "$0")"
 
-K=${KDIR:-/home/bob/rk3528-armbian/sdk/armbian/cache/sources/linux-kernel-worktree/6.1__rk35xx__arm64}
+K=${KDIR:-/home/bob/rk3528_armbian/framework/cache/sources/linux-kernel-worktree/6.1__rk35xx__arm64}
 REL=${REL:-6.1.172-vendor-rk35xx}
 B=$PWD/aic8800/sdio/aic8800
 MAKE_ARGS="ARCH=arm64 CROSS_COMPILE=aarch64-linux-gnu- CONFIG_PLATFORM_UBUNTU=y LOCALVERSION=-vendor-rk35xx"
@@ -44,7 +44,7 @@ else
 fi
 
 echo "=== 打包 ==="
-OUT=~/rk3528-armbian/build/aic8800-m28k-$REL-$(date +%Y%m%d-%H%M).tar.gz
+OUT=~/rk3528_armbian/artifacts/build/aic8800-m28k-$REL-$(date +%Y%m%d-%H%M).tar.gz
 tar czf "$OUT" -C "$D" .
 md5sum "$OUT"
 echo "✅ $OUT"
