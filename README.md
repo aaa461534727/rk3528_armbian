@@ -15,8 +15,8 @@
 | `framework/` | **armbian/build** 构建框架 (我们只读它, 不改它) | ❌ 可 `scripts/init-framework.sh` 重建 |
 | `userpatches/` | **我们对镜像的全部改动** (armbian 官方注入点) | ✅ |
 | `src/` | 自研 / 移植源码: `aic8800-sdio` 驱动 · `playport` Linux 移植 | ✅ |
-| `scripts/` | 构建 / 部署 / 烧录 / 初始化 | ✅ |
-| `docs/` | 文档 | ✅ |
+| `scripts/` | 构建 / 部署 / 烧录 / 初始化 / 离线物料 | ✅ |
+| `docs/` | 文档 (含 `OFFLINE_BUILD.md` 断网编译) | ✅ |
 | `artifacts/` | 镜像 · 驱动包 · 编译日志 · JDK21 · playport dist | ❌ 本机产物 |
 | `README.md` | 本文件 | ✅ |
 
@@ -38,6 +38,21 @@
 # 3) 烧 SD 卡
 sudo ./scripts/flash-sd.sh /dev/sdX artifacts/images/m28k-trixie-*.img
 ```
+
+## 📴 离线编译 (没网的机器也能出镜像)
+
+编译期要联网下载的东西 (内核/u-boot 裸库、WiFi 驱动源码、apt deb、补丁…约 5 GB) 已打包成
+GitHub Release `buildcache-20261030`。拉下来就能断网编:
+
+```sh
+export GITHUB_TOKEN=...          # 私仓; 或写 ~/.gh_token
+./scripts/fetch-cache.sh         # 一次性: 拉 framework 快照 + cache (断点续传)
+./scripts/build-image.sh --offline
+```
+
+框架自带的 `OFFLINE_WORK=yes` 管不到 base-files.json / apt update / customize 阶段的
+`apt-get install`, 这三处由 `userpatches/extensions/offline-cache.sh` 接到本地缓存。
+细节、物料清单、验证方法见 **`docs/OFFLINE_BUILD.md`**。
 
 ## 🔧 驱动 (AIC8800 WiFi6 + BT)
 
@@ -67,6 +82,7 @@ sudo ./scripts/flash-sd.sh /dev/sdX artifacts/images/m28k-trixie-*.img
 - 2026-10-29 出第一版镜像 `m28k-trixie-v1-cachekernel.img`
 - 2026-10-29 出 PlayPort 版 `m28k-trixie-v3-playport.img`
 - 2026-10-30 AIC8800 WiFi+BT 适配 (编译侧)
+- 2026-10-30 **断网可编**: Release `buildcache-20261030` 发编译期物料 + `fetch-cache.sh` + `build-image.sh --offline`
 - 2026-10-30 **目录重组**: 由 `~/rk3528-armbian/{build,docs,drivers,images,logs,playport,sdk,tools}` 8 个平级目录
   收敛为本仓 (`userpatches` 从框架里提出来, 框架降为可重建的 `framework/`)
 
