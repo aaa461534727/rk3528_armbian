@@ -1,0 +1,1 @@
+PLAYPORT_ARGS="--wireless --bt-bridge /opt/playport/bin/bt-bridge"

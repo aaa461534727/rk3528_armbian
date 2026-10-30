@@ -1,0 +1,16 @@
+[Unit]
+Description=PlayPort (CarPlay receiver)
+After=network-online.target bluetooth.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=/opt/playport
+EnvironmentFile=/etc/default/playport
+Environment=JAVA_HOME=/usr/lib/jvm/java-21-openjdk-arm64
+ExecStart=/opt/playport/bin/server $PLAYPORT_ARGS
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target

@@ -1,0 +1,46 @@
+# ============================================================
+# rk3528_armbian —— 单一 SDK 仓
+# 收: 我们的改动 (userpatches / src / scripts / docs)
+# 不收: 框架 (可重建) · 产物 · 大二进制 · 敏感身份材料
+# 注意: .gitignore 不支持行尾注释, 注释必须独占一行
+# ============================================================
+
+# ---- 框架: 由 scripts/init-framework.sh 从 GitHub 重建 ----
+/framework/
+
+# ---- 产物: 镜像 / 驱动包 / 日志 / JDK / playport dist ----
+/artifacts/
+
+# ---- 构建中间物 ----
+*.o
+*.ko
+*.mod
+*.mod.c
+.*.cmd
+*.symvers
+Module.symvers
+modules.order
+.tmp_versions/
+*.apk
+output/
+cache/
+
+# ---- overlay 里的大二进制 (由 scripts/prepare-playport.sh 灌入) ----
+/userpatches/overlay/opt/playport/lib/
+
+# ---- 敏感: MFi 身份 (证书 + 私钥) 永不入仓 ----
+/userpatches/overlay/opt/playport/identity/offline-mfi/
+**/offline-mfi/*.pk8
+**/offline-mfi/*.p7b
+**/identity/*.pem
+*.key
+*.pk8
+*.p7b
+
+# ---- 杂项 ----
+*.log
+*.tmp
+*.swp
+.DS_Store
+__pycache__/
+*.pyc

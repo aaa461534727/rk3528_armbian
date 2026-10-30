@@ -1,0 +1,105 @@
+diff --git a/server/src/main/kotlin/com/playport/server/WifiInfo.kt b/server/src/main/kotlin/com/playport/server/WifiInfo.kt
+index 680ddd2..c7a33c2 100644
+--- a/server/src/main/kotlin/com/playport/server/WifiInfo.kt
++++ b/server/src/main/kotlin/com/playport/server/WifiInfo.kt
+@@ -4,7 +4,12 @@ import org.slf4j.LoggerFactory
+ 
+ data class WifiNetwork(val ssid: String, val channel: Int)
+ 
+-/** Reads the current Wi-Fi network on macOS so the wireless bootstrap can hand it to the phone. */
++/**
++ * Reads the current Wi-Fi network so the wireless bootstrap can hand it to the phone.
++ *
++ * macOS: networksetup / ipconfig / system_profiler.
++ * Linux: NetworkManager (nmcli) then iw, falling back to /proc/net/wireless.
++ */
+ object WifiInfo {
+     private val log = LoggerFactory.getLogger("wifi")
+ 
+@@ -15,8 +20,52 @@ object WifiInfo {
+         return WifiNetwork(ssid, channel)
+     }
+ 
+-    private fun currentSsid(): String? {
+-        // networksetup on the Wi-Fi hardware port (usually en0).
++    private val isLinux = System.getProperty("os.name").lowercase().contains("linux")
++
++    private fun currentSsid(): String? = if (isLinux) linuxSsid() else macSsid()
++
++    private fun currentChannel(): Int? = if (isLinux) linuxChannel() else macChannel()
++
++    // --- Linux -------------------------------------------------------------
++
++    private fun wirelessInterface(): String? {
++        val iw = runCatching { run("iw", "dev") }.getOrNull() ?: return null
++        return Regex("Interface\\s+(\\S+)").find(iw)?.groupValues?.get(1)
++    }
++
++    private fun linuxSsid(): String? {
++        val nm = runCatching { run("nmcli", "-t", "-f", "ACTIVE,SSID", "device", "wifi") }.getOrNull()
++        if (nm != null) {
++            nm.lineSequence()
++                .firstOrNull { it.startsWith("yes:") }
++                ?.substringAfter(':')
++                ?.trim()
++                ?.takeIf { it.isNotEmpty() }
++                ?.let { return it }
++        }
++        val iface = wirelessInterface() ?: return null
++        val link = runCatching { run("iw", "dev", iface, "link") }.getOrNull() ?: return null
++        return Regex("SSID:\\s*(.+)").find(link)?.groupValues?.get(1)?.trim()?.takeIf { it.isNotEmpty() }
++    }
++
++    private fun linuxChannel(): Int? {
++        val iface = wirelessInterface() ?: return null
++        val link = runCatching { run("iw", "dev", iface, "link") }.getOrNull() ?: return null
++        val freq = Regex("freq:\\s*(\\d+)").find(link)?.groupValues?.get(1)?.toIntOrNull() ?: return null
++        return freqToChannel(freq)
++    }
++
++    private fun freqToChannel(freq: Int): Int = when {
++        freq == 2484 -> 14
++        freq in 2412..2472 -> (freq - 2407) / 5
++        freq in 5000..5900 -> (freq - 5000) / 5
++        freq in 5955..7115 -> (freq - 5950) / 5
++        else -> 0
++    }
++
++    // --- macOS -------------------------------------------------------------
++
++    private fun macSsid(): String? {
+         wifiHardwarePort()?.let { device ->
+             val output = runCatching { run("networksetup", "-getairportnetwork", device) }.getOrNull()
+             output?.lineSequence()
+@@ -26,8 +75,6 @@ object WifiInfo {
+                 ?.takeIf { it.isNotEmpty() }
+                 ?.let { return it }
+         }
+-        // Fallback: ipconfig summaries. macOS redacts SSID unless the calling app has Location
+-        // Services permission, which surfaces here as "<redacted>".
+         for (iface in interfaceNames()) {
+             val summary = runCatching { run("ipconfig", "getsummary", iface) }.getOrNull() ?: continue
+             val ssid = summary.lineSequence()
+@@ -60,7 +107,7 @@ object WifiInfo {
+         java.net.NetworkInterface.getNetworkInterfaces().toList().map { it.name }
+     }.getOrDefault(emptyList())
+ 
+-    private fun currentChannel(): Int? = runCatching {
++    private fun macChannel(): Int? = runCatching {
+         val output = run("system_profiler", "SPAirPortDataType")
+         Regex("Channel:\\s*(\\d+)").find(output)?.groupValues?.get(1)?.toIntOrNull()
+     }.getOrNull()
+diff --git a/server/src/main/kotlin/com/playport/server/WirelessBootstrap.kt b/server/src/main/kotlin/com/playport/server/WirelessBootstrap.kt
+index 8d0e24f..d44c4fa 100644
+--- a/server/src/main/kotlin/com/playport/server/WirelessBootstrap.kt
++++ b/server/src/main/kotlin/com/playport/server/WirelessBootstrap.kt
+@@ -127,6 +127,9 @@ class WirelessBootstrap(private val server: CarPlayServer) : Closeable {
+             configured,
+             Path.of("macos/bt-bridge/bt-bridge"),
+             Path.of("macos/bt-bridge/.build/bt-bridge"),
++            Path.of("bin/bt-bridge"),
++            Path.of("linux/bt-bridge"),
++            Path.of(System.getProperty("user.home"), ".playport", "bt-bridge"),
+         )
+         return candidates.firstOrNull { Files.isExecutable(it) }
+     }

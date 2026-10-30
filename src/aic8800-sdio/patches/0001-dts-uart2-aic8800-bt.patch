@@ -1,0 +1,32 @@
+From: dengbaowen <dengbaowen@localhost>
+Subject: [PATCH] arm64: dts: rockchip: rk3528-mangopi-m28k: add AIC8800 bluetooth over uart2
+
+M28K 板载 AIC8800 (SDIO WiFi + UART BT)。内核 6.1 vendor 已自带
+drivers/bluetooth/hci_aic.c (serdev, of_match "cvte,aic8800-bt"),
+只需在 &uart2 下挂 serdev 子节点, 并把 RTS 纳入 pinctrl
+(hci_aic 的 aic_open() 要求 hci_uart_has_flow_control, 缺 RTS 会直接失败)。
+
+写法参照同平台 rk3528-nanopi-rev03.dts。BT wake gpio 与 R28S 同为 gpio1 RK_PB4
+(同一参考设计)。
+
+---
+ arch/arm64/boot/dts/rockchip/rk3528-mangopi-m28k.dts | 10 +++++++++-
+ 1 file changed, 9 insertions(+), 1 deletion(-)
+
+diff --git a/arch/arm64/boot/dts/rockchip/rk3528-mangopi-m28k.dts b/arch/arm64/boot/dts/rockchip/rk3528-mangopi-m28k.dts
+--- a/arch/arm64/boot/dts/rockchip/rk3528-mangopi-m28k.dts
++++ b/arch/arm64/boot/dts/rockchip/rk3528-mangopi-m28k.dts
+@@ -756,7 +756,12 @@
+ &uart2 {
+ 	status = "okay";
+ 	pinctrl-names = "default";
+-	pinctrl-0 = <&uart2m1_xfer &uart2m1_ctsn>;
++	pinctrl-0 = <&uart2m1_xfer &uart2m1_ctsn &uart2m1_rtsn>;
++
++	bluetooth {
++		compatible = "cvte,aic8800-bt";
++		device-wake-gpios = <&gpio1 RK_PB4 GPIO_ACTIVE_HIGH>;
++	};
+ };
+ 
+ &uart3 {

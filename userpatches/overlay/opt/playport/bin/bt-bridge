@@ -1,0 +1,288 @@
+#!/usr/bin/env python3
+"""PlayPort Linux Bluetooth bridge (replacement for macos/bt-bridge).
+
+Opens an RFCOMM channel to a paired iPhone's iAP2 service and pipes raw bytes
+between the channel and stdin/stdout, so the JVM server can speak the wireless
+iAP2 bootstrap over a child process (same CLI contract as the macOS helper).
+
+Usage:
+  bt-bridge.py --print-address        print the local Bluetooth adapter address
+  bt-bridge.py --list                 list bonded devices: "AA:BB:CC:DD:EE:FF Name"
+  bt-bridge.py --address <mac>        open RFCOMM to the device and pump stdio
+  bt-bridge.py --address <mac> --channel <n>   skip SDP, use a fixed channel
+
+Channel discovery order:
+  1. --channel
+  2. sdptool browse (if bluez-deprecated-tools is installed)
+  3. built-in SDP client over L2CAP (PSM 1), searching for the iAP2 UUID
+  4. probing channels 1..30 (last resort, may hit a non-iAP2 service)
+"""
+import argparse
+import os
+import re
+import select
+import socket
+import struct
+import sys
+import time
+
+# 00000000-deca-fade-deca-deafdecacafe
+IAP2_UUID128 = bytes.fromhex("00000000decafadecadeafdecacafe")
+RFCOMM_UUID16 = 0x0003
+SDP_PSM = 0x0001
+
+
+def log(msg):
+    sys.stderr.write("bt-bridge: %s\n" % msg)
+    sys.stderr.flush()
+
+
+def norm(mac):
+    return mac.replace("-", ":").upper()
+
+
+def die(msg):
+    log(msg)
+    sys.exit(1)
+
+
+def adapter_dir():
+    base = "/var/lib/bluetooth"
+    try:
+        dirs = [d for d in os.listdir(base) if re.match(r"^([0-9A-Fa-f]{2}:){5}[0-9A-Fa-f]{2}$", d)]
+    except OSError:
+        return None
+    return os.path.join(base, dirs[0]) if dirs else None
+
+
+def print_address():
+    for hci in sorted(os.listdir("/sys/class/bluetooth")) if os.path.isdir("/sys/class/bluetooth") else []:
+        path = "/sys/class/bluetooth/%s/address" % hci
+        try:
+            with open(path) as fh:
+                print(norm(fh.read().strip()))
+                return
+        except OSError:
+            continue
+    # fall back to bluetoothctl
+    out = os.popen("bluetoothctl list 2>/dev/null").read()
+    m = re.search(r"([0-9A-Fa-f]{2}:){5}[0-9A-Fa-f]{2}", out)
+    if m:
+        print(norm(m.group(0)))
+    else:
+        die("local Bluetooth address unavailable")
+
+
+def list_paired():
+    adir = adapter_dir()
+    found = False
+    if adir:
+        try:
+            entries = os.listdir(adir)
+        except OSError:
+            entries = []
+        for mac in entries:
+            if not re.match(r"^([0-9A-Fa-f]{2}:){5}[0-9A-Fa-f]{2}$", mac):
+                continue
+            info = os.path.join(adir, mac, "info")
+            if not os.path.isfile(info):
+                continue
+            name, paired = "", False
+            try:
+                with open(info, errors="replace") as fh:
+                    for line in fh:
+                        if line.startswith("Name="):
+                            name = line.split("=", 1)[1].strip()
+                        elif line.startswith("Paired="):
+                            paired = line.split("=", 1)[1].strip().lower() == "true"
+            except OSError:
+                continue
+            if paired:
+                print("%s %s" % (norm(mac), name))
+                found = True
+    if not found:
+        out = os.popen("bluetoothctl devices Paired 2>/dev/null").read()
+        for line in out.splitlines():
+            m = re.match(r"Device\s+((?:[0-9A-Fa-f]{2}:){5}[0-9A-Fa-f]{2})\s*(.*)", line)
+            if m:
+                print("%s %s" % (norm(m.group(1)), m.group(2).strip()))
+
+
+# --- minimal SDP client ------------------------------------------------------
+
+def _de_len(n):
+    if n < 0x100:
+        return bytes([n])
+    if n < 0x10000:
+        return b"\x01" + struct.pack(">H", n)
+    return b"\x02" + struct.pack(">I", n)
+
+
+def sdp_channel_via_sdptool(mac):
+    if not any(os.access(os.path.join(p, "sdptool"), os.X_OK)
+               for p in os.environ.get("PATH", "").split(os.pathsep)):
+        return None
+    out = os.popen("sdptool browse %s 2>/dev/null" % mac).read()
+    blocks = out.split("Service Name:")
+    for block in blocks:
+        if "00000000-deca-fade-deca-deafdecacafe" in block.lower():
+            m = re.search(r"Channel:\s*(\d+)", block)
+            if m:
+                return int(m.group(1))
+    return None
+
+
+def _parse_de(data, i):
+    """Return (type, value, next_index, raw_type_byte) for one data element."""
+    tag = data[i]
+    t = tag >> 3
+    size = tag & 0x07
+    i += 1
+    if size == 5:
+        length, i = struct.unpack_from(">B", data, i)[0], i + 1
+    elif size == 6:
+        length, i = struct.unpack_from(">H", data, i)[0], i + 2
+    elif size == 7:
+        length, i = struct.unpack_from(">I", data, i)[0], i + 4
+    else:
+        length = (1, 2, 4, 8, 16, 0, 0, 0)[size]
+    raw = data[i:i + length]
+    return t, raw, i + length
+
+
+def _walk_rfcomm(blob):
+    """Find uuid16 RFCOMM (0x0003) in a ProtocolDescriptorList and return its uint8 channel."""
+    for i in range(len(blob) - 4):
+        if blob[i] == 0x19 and blob[i + 1:i + 3] == b"\x00\x03" and blob[i + 3] == 0x08:
+            return blob[i + 4]
+    return None
+
+
+def sdp_channel_via_l2cap(mac, timeout=8.0):
+    try:
+        sock = socket.socket(socket.AF_BLUETOOTH, socket.SOCK_SEQPACKET, socket.BTPROTO_L2CAP)
+        sock.settimeout(timeout)
+        sock.connect((mac, SDP_PSM))
+    except OSError as exc:
+        log("SDP connect failed: %s" % exc)
+        return None
+    try:
+        search = b"\x35" + _de_len(17) + b"\x1c" + IAP2_UUID128
+        attrs = b"\x35" + _de_len(3) + b"\x09\x00\x04"   # ProtocolDescriptorList
+        params = search + struct.pack(">H", 0xFFFF) + attrs + b"\x00"
+        pdu = b"\x06\x00\x01" + struct.pack(">H", len(params)) + params
+        sock.send(pdu)
+        resp = sock.recv(65535)
+    except OSError as exc:
+        log("SDP query failed: %s" % exc)
+        return None
+    finally:
+        sock.close()
+    if len(resp) < 7 or resp[0] != 0x07:
+        return None
+    total, current, blen = struct.unpack_from(">HHH", resp, 3)
+    if current == 0:
+        return None
+    blob = resp[9:9 + blen]
+    return _walk_rfcomm(blob)
+
+
+def open_rfcomm(mac, channel, timeout=10.0):
+    sock = socket.socket(socket.AF_BLUETOOTH, socket.SOCK_STREAM, socket.BTPROTO_RFCOMM)
+    sock.settimeout(timeout)
+    sock.connect((mac, channel))
+    return sock
+
+
+def find_channel(mac, pinned):
+    if pinned:
+        return pinned
+    ch = sdp_channel_via_sdptool(mac)
+    if ch:
+        log("iAP2 RFCOMM channel %d (sdptool)" % ch)
+        return ch
+    ch = sdp_channel_via_l2cap(mac)
+    if ch:
+        log("iAP2 RFCOMM channel %d (SDP)" % ch)
+        return ch
+    for candidate in range(1, 31):
+        try:
+            sock = open_rfcomm(mac, candidate, timeout=2.0)
+            sock.close()
+            log("iAP2 SDP lookup failed; using first open RFCOMM channel %d" % candidate)
+            return candidate
+        except OSError:
+            continue
+    return None
+
+
+def pump(mac, channel):
+    try:
+        sock = open_rfcomm(mac, channel)
+    except OSError as exc:
+        die("could not open RFCOMM channel %d to %s: %s" % (channel, mac, exc))
+    log("RFCOMM channel %d open to %s" % (channel, mac))
+    stdin = sys.stdin.buffer
+    stdout = sys.stdout.buffer
+    while True:
+        try:
+            ready, _, _ = select.select([stdin, sock], [], [], 1.0)
+        except InterruptedError:
+            continue
+        if stdin in ready:
+            data = os.read(stdin.fileno(), 4096)
+            if not data:
+                log("stdin closed")
+                return
+            sock.sendall(data)
+        if sock in ready:
+            try:
+                data = sock.recv(4096)
+            except OSError as exc:
+                log("RFCOMM read failed: %s" % exc)
+                return
+            if not data:
+                log("RFCOMM channel closed")
+                return
+            stdout.write(data)
+            stdout.flush()
+
+
+def main():
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--print-address", action="store_true")
+    parser.add_argument("--list", action="store_true")
+    parser.add_argument("--address")
+    parser.add_argument("--channel", type=int, default=0)
+    parser.add_argument("--scan", type=int, nargs="?", const=10)
+    parser.add_argument("--pair")
+    parser.add_argument("--force-pair", action="store_true")
+    args = parser.parse_args()
+
+    if args.print_address:
+        print_address()
+    elif args.list:
+        list_paired()
+    elif args.scan:
+        out = os.popen("bluetoothctl --timeout %d scan on 2>/dev/null" % args.scan).read()
+        for line in out.splitlines():
+            m = re.search(r"Device ((?:[0-9A-Fa-f]{2}:){5}[0-9A-Fa-f]{2}) (.*)", line)
+            if m:
+                print("%s %s" % (norm(m.group(1)), m.group(2)))
+    elif args.pair:
+        mac = norm(args.pair)
+        script = "pair %s\ntrust %s\nquit\n" % (mac, mac)
+        os.system("bluetoothctl <<'EOF'\n%sEOF" % script)
+    elif args.address:
+        mac = norm(args.address)
+        channel = find_channel(mac, args.channel)
+        if channel is None:
+            die("could not find the iAP2 RFCOMM channel for %s" % mac)
+        pump(mac, channel)
+    else:
+        parser.print_help()
+        sys.exit(1)
+
+
+if __name__ == "__main__":
+    main()
