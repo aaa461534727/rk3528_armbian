@@ -4,10 +4,23 @@
 set -e
 export DEBIAN_FRONTEND=noninteractive
 
+# 网络不稳定时 apt 会偶发失败: 重试 5 次 + 拉长超时 + 单包失败不整体放弃
+APT_OPTS="-o Acquire::Retries=5 -o Acquire::http::Timeout=60 -o Acquire::https::Timeout=60"
 echo "[customize] 1/5 装包" >&2
-apt-get update
-apt-get install -y --no-install-recommends \
-    openjdk-21-jre-headless bluez iw rfkill openssh-server
+for i in 1 2 3; do
+  apt-get $APT_OPTS update && break
+  echo "[customize] apt update 第 $i 次失败, 5s 后重试" >&2; sleep 5
+done
+for i in 1 2 3; do
+  apt-get $APT_OPTS install -y --no-install-recommends \
+      openjdk-21-jre-headless bluez iw rfkill openssh-server && break
+  echo "[customize] apt install 第 $i 次失败, 10s 后重试" >&2; sleep 10
+  apt-get $APT_OPTS update >/dev/null 2>&1 || true
+done
+# 三个关键包必须真的装上, 否则镜像白出
+for pkg in openjdk-21-jre-headless bluez openssh-server; do
+  dpkg -s "$pkg" >/dev/null 2>&1 || { echo "[customize] !! 缺关键包 $pkg" >&2; exit 1; }
+done
 
 echo "[customize] 2/5 开 SSH + root 登录 (root/root)" >&2
 systemctl enable ssh.service || true

@@ -18,7 +18,15 @@ if [ -d "$FW/.git" ]; then
 fi
 
 echo "→ clone armbian/build 到 $FW (浅克隆)"
-git clone --depth 1 --branch "$ARMBRANCH" https://github.com/armbian/build.git "$FW"
+# 网络不稳时 clone 会断: 最多 4 次, 每次删残目录重来
+for i in 1 2 3 4; do
+    if git clone --depth 1 --branch "$ARMBRANCH" https://github.com/armbian/build.git "$FW"; then
+        break
+    fi
+    echo "✗ clone 第 $i 次失败, 删残目录后 10s 重试" >&2
+    rm -rf "$FW"; sleep 10
+done
+[ -d "$FW/.git" ] || { echo "✗ armbian/build clone 4 次都失败, 检查网络后重跑本脚本" >&2; exit 1; }
 mkdir -p "$FW/userpatches"
 echo "✓ 完成: $(git -C "$FW" log --oneline -1)"
 echo "  下一步: ./scripts/build-image.sh"
